@@ -6,6 +6,97 @@ import io
 from io import BytesIO
 import re
 
+def get_db_connection():
+    return pymysql.connect(
+        host='172.20.0.166',
+        user='jxiong',
+        password='S1mc0na2025!',
+        database='ScannerData'
+    )
+
+
+def save_stage2_to_db(df):
+    """Save Stage 2 cleaned session data to the CleanedSessions table in ScannerData."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Create table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS CleanedSessions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                date DATE,
+                name VARCHAR(100),
+                job_number VARCHAR(50),
+                sequence VARCHAR(20),
+                serial_number VARCHAR(100),
+                start_time DATETIME,
+                end_time DATETIME,
+                comment TEXT,
+                stored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Determine date range and delete existing rows for that range
+        dates = pd.to_datetime(df['Date']).dt.date
+        min_date = dates.min()
+        max_date = dates.max()
+        cursor.execute(
+            "DELETE FROM CleanedSessions WHERE date BETWEEN %s AND %s",
+            (min_date, max_date)
+        )
+
+        # Build rows for insert, handling NaT and missing Comment column
+        rows = []
+        for _, row in df.iterrows():
+            row_date = pd.to_datetime(row['Date']).date()
+
+            def to_dt(val, row_date):
+                try:
+                    ts = pd.to_datetime(val)
+                    if pd.isna(ts):
+                        return None
+                    # If date defaulted to 1900-01-01 (time-only value), combine with row date
+                    if ts.year == 1900:
+                        return datetime.combine(row_date, ts.time())
+                    return ts.to_pydatetime()
+                except Exception:
+                    return None
+
+            start_dt = to_dt(row.get('StartTime'), row_date)
+            end_dt = to_dt(row.get('EndTime'), row_date)
+            comment = row.get('Comment', '')
+            if not isinstance(comment, str) or pd.isna(comment):
+                comment = ''
+            serial_number = row.get('Serial_Number', '')
+            if not isinstance(serial_number, str) or pd.isna(serial_number):
+                serial_number = ''
+
+            rows.append((
+                row_date,
+                str(row.get('Name', '')),
+                str(row.get('Job_Number', '')),
+                str(row.get('Sequence', '')),
+                serial_number,
+                start_dt,
+                end_dt,
+                str(comment)
+            ))
+
+        cursor.executemany(
+            """INSERT INTO CleanedSessions
+               (date, name, job_number, sequence, serial_number, start_time, end_time, comment)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            rows
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return "ok"
+    except Exception as e:
+        return str(e)
+
+
 st.title("📊 Worker Time Data Portal")
 
 worker_url = "https://raw.githubusercontent.com/JieXiong0111/TimeData_Processing/main/Worker%20List.xlsx"
@@ -45,12 +136,7 @@ if st.session_state.step == 1:
 
     # ---- Load data ----
     if load_clicked or skip_clicked:
-        conn = pymysql.connect(
-            host='172.20.0.166',
-            user='jxiong',
-            password='S1mc0na2025!',
-            database='ScannerData'
-        )
+        conn = get_db_connection()
 
         query = f"""
         SELECT * FROM Scans
@@ -607,6 +693,9 @@ elif st.session_state.step == 4:
         if "df_step5_input" not in st.session_state:
             st.error("⚠️ Please upload a file before continuing.")
         else:
+            result = save_stage2_to_db(st.session_state.df_step5_input)
+            if result != "ok":
+                st.error(f"Failed to save to database: {result}")
             st.session_state.step = 5
             st.rerun()
 
